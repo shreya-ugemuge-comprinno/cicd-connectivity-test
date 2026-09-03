@@ -21,7 +21,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::441931764410:role/github-actions-eks-deploy
+          role-to-assume: arn:aws:iam::441931764410:role/neuraltalk-dev-eks-deployment-role
           aws-region: us-east-1
 
       - name: Check AWS identity
