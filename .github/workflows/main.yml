@@ -1,50 +1,75 @@
-name: GitHub Actions AWS Test
+name: EKS Connectivity Test
 
+# Runs on push to main, and can also be triggered manually from the Actions tab
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  id-token: write
+  id-token: write   # REQUIRED: lets the runner request an OIDC token for AWS
   contents: read
 
-jobs:
-  aws-test:
-    runs-on: ubuntu-latest
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER: neuraltalk-dev-eks-cluster
+  ROLE_ARN: arn:aws:iam::441931764410:role/github-actions-eks-deploy-role
 
+jobs:
+  connectivity-test:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Debug - Raw STS Call
-        run: |
-          # Get the OIDC token from GitHub
-          OIDC_TOKEN=$(curl -s \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
-          
-          echo "Token length: ${#OIDC_TOKEN}"
-          
-          # Decode the sub claim from the token
-          echo "=== Token Claims ==="
-          echo $OIDC_TOKEN | cut -d'.' -f2 | base64 -d 2>/dev/null | jq '{sub, aud, iss}'
-          
-          # Try raw STS call and capture full error
-          echo "=== STS Response ==="
-          aws sts assume-role-with-web-identity \
-            --role-arn arn:aws:iam::441931764410:role/neuraltalk-dev-eks-deployment-role \
-            --role-session-name test-session \
-            --web-identity-token "$OIDC_TOKEN" \
-            --region us-east-1 2>&1 || true
-
-      - name: Configure AWS credentials
+      # Step 1: Authenticate to AWS via OIDC (no long-lived keys)
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::441931764410:role/neuraltalk-dev-eks-deployment-role
-          aws-region: us-east-1
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Check AWS identity
+      # Step 2: Confirm which identity we assumed
+      - name: Verify AWS identity
         run: |
+          echo "=== AWS STS caller identity ==="
           aws sts get-caller-identity
+
+      # Step 3: Confirm we can call the EKS control-plane API
+      - name: Describe EKS cluster
+        run: |
+          echo "=== EKS cluster status ==="
+          aws eks describe-cluster \
+            --name "$EKS_CLUSTER" \
+            --region "$AWS_REGION" \
+            --query 'cluster.{name:name,status:status,version:version}' \
+            --output table
+
+      # Step 4: Generate kubeconfig for the cluster
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER" \
+            --region "$AWS_REGION"
+
+      # Step 5: Confirm Kubernetes API access + RBAC permissions
+      - name: Test Kubernetes access
+        run: |
+          echo "=== kubectl version (server reachable?) ==="
+          kubectl version
+
+          echo "=== Cluster nodes ==="
+          kubectl get nodes -o wide
+
+          echo "=== Namespaces ==="
+          kubectl get namespaces
+
+          echo "=== Pods across all namespaces ==="
+          kubectl get pods -A
+
+          echo "=== What can this role do? (RBAC self-check) ==="
+          kubectl auth can-i create deployments
+          kubectl auth can-i get pods
+
+      - name: Done
+        run: echo "✅ Connectivity test passed — OIDC auth, EKS API, and Kubernetes access all working."
